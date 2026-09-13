@@ -1,0 +1,23 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m py_compile verifier.py
+      - run: |
+          python - <<'PY'
+          from verifier import verify
+          base={"kind":"flood","title":"River flooding reported","description":"water rising","observed_at":"2026-01-01T12:00:00+00:00","area":"Test Area","geometry":{"type":"Point","coordinates":[-3.7,40.4]},"severity":0.8,"official":False,"source":{"name":"A"},"id":"1","confidence":0.6}
+          other={**base,"id":"2","source":{"name":"B"},"confidence":0.7}
+          out=verify([base,other])
+          assert len(out)==1
+          assert out[0]['verification']['independent_source_count']==2
+          assert out[0]['confidence']>0.7
+          PY
