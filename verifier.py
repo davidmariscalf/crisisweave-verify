@@ -5,7 +5,7 @@ import math
 import re
 import sys
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 MATCH_THRESHOLD = 0.67
@@ -30,9 +30,12 @@ def _dt(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _hours(a: str | None, b: str | None) -> float | None:
@@ -50,9 +53,14 @@ def _point(event: dict[str, Any]) -> tuple[float, float] | None:
     if not isinstance(c, list) or len(c) != 2:
         return None
     try:
-        return float(c[0]), float(c[1])
+        lon, lat = float(c[0]), float(c[1])
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(lon) or not math.isfinite(lat):
+        return None
+    if not -180.0 <= lon <= 180.0 or not -90.0 <= lat <= 90.0:
+        return None
+    return lon, lat
 
 
 def _km(a: tuple[float, float] | None, b: tuple[float, float] | None) -> float | None:
@@ -62,11 +70,12 @@ def _km(a: tuple[float, float] | None, b: tuple[float, float] | None) -> float |
     lon2, lat2 = map(math.radians, b)
     dlon, dlat = lon2 - lon1, lat2 - lat1
     h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    return 6371.0088 * 2 * math.asin(min(1.0, math.sqrt(h)))
+    return 6371.0088 * 2 * math.asin(min(1.0, math.sqrt(max(0.0, h))))
 
 
 def candidate_score(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, dict[str, float | None]]:
-    ka, kb = a.get("kind", "other"), b.get("kind", "other")
+    ka = str(a.get("kind") or "other").casefold()
+    kb = str(b.get("kind") or "other").casefold()
     if ka != kb and "other" not in (ka, kb):
         return 0.0, {"text": 0.0, "time": None, "distance": None, "area": 0.0}
 
@@ -95,14 +104,28 @@ def candidate_score(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, dict[s
 
 
 def _source_key(event: dict[str, Any]) -> str:
-    s = event.get("source") or {}
-    return str(s.get("name") or s.get("url") or s.get("source_id") or event.get("id") or "unknown")
+    source = event.get("source") if isinstance(event.get("source"), dict) else {}
+    return str(source.get("name") or source.get("url") or source.get("source_id") or event.get("id") or "unknown")
+
+
+def _event_key(event: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    observed = _dt(event.get("observed_at"))
+    observed_key = observed.isoformat() if observed is not None else ""
+    return (
+        str(event.get("kind") or "other").casefold(),
+        observed_key,
+        _source_key(event).casefold(),
+        str(event.get("id") or ""),
+        str(event.get("title") or "").casefold(),
+    )
 
 
 def _evidence_weight(event: dict[str, Any]) -> float:
     try:
         base = float(event.get("confidence", 0.4))
     except (TypeError, ValueError):
+        base = 0.4
+    if not math.isfinite(base):
         base = 0.4
     if event.get("official"):
         base = max(base, 0.82)
@@ -117,47 +140,63 @@ def aggregate_confidence(events: list[dict[str, Any]]) -> tuple[float, list[dict
 
     residual = 1.0
     explanation: list[dict[str, Any]] = []
-    for source, weight in sorted(strongest_by_source.items()):
+    for source, weight in sorted(strongest_by_source.items(), key=lambda item: item[0].casefold()):
         residual *= 1.0 - weight
         explanation.append({"source": source, "weight": round(weight, 4)})
     return round(min(0.995, 1.0 - residual), 4), explanation
 
 
 def cluster(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Create deterministic complete-link clusters.
+
+    Input order must not change the result. An event may join a group only when
+    it clears the match threshold against every current member, preventing a
+    weak A-B-C bridge from merging reports that do not directly corroborate
+    one another.
+    """
+
     groups: list[list[dict[str, Any]]] = []
-    for event in events:
-        best_group = None
-        best_score = 0.0
-        for group in groups:
-            score, _ = candidate_score(event, group[0])
-            if score >= MATCH_THRESHOLD and score > best_score:
-                best_group, best_score = group, score
-        if best_group is None:
+    for event in sorted(events, key=_event_key):
+        candidates: list[tuple[float, tuple, int]] = []
+        for index, group in enumerate(groups):
+            scores = [candidate_score(event, member)[0] for member in group]
+            if scores and min(scores) >= MATCH_THRESHOLD:
+                candidates.append((sum(scores) / len(scores), _event_key(group[0]), index))
+        if not candidates:
             groups.append([event])
-        else:
-            best_group.append(event)
+            continue
+        _, _, chosen = max(candidates, key=lambda row: (row[0], tuple(reversed(row[1]))))
+        groups[chosen].append(event)
+
+    for group in groups:
+        group.sort(key=_event_key)
+    groups.sort(key=lambda group: _event_key(group[0]))
     return groups
 
 
 def merge_group(group: list[dict[str, Any]]) -> dict[str, Any]:
-    ranked = sorted(group, key=lambda e: (_evidence_weight(e), bool(e.get("official"))), reverse=True)
+    ranked = sorted(
+        group,
+        key=lambda e: (-_evidence_weight(e), -int(bool(e.get("official"))), _event_key(e)),
+    )
     merged = deepcopy(ranked[0])
     confidence, sources = aggregate_confidence(group)
     merged["confidence"] = confidence
     merged["official"] = any(bool(e.get("official")) for e in group)
     merged["evidence"] = sources
     merged["verification"] = {
-        "method": "crisisweave-deterministic-v1",
+        "method": "crisisweave-deterministic-v2",
         "report_count": len(group),
         "independent_source_count": len(sources),
-        "merged_event_ids": [str(e.get("id")) for e in group],
+        "merged_event_ids": [str(e.get("id")) for e in sorted(group, key=_event_key)],
         "confidence_note": "ranking signal, not probability of truth",
     }
     return merged
 
 
 def verify(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [merge_group(group) for group in cluster(events)]
+    clean = [event for event in events if isinstance(event, dict)]
+    return [merge_group(group) for group in cluster(clean)]
 
 
 def main() -> int:
