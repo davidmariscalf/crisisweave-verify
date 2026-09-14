@@ -1,0 +1,64 @@
+import itertools
+import unittest
+
+from verifier import _point, candidate_score, verify
+
+
+class VerifierTests(unittest.TestCase):
+    def event(self, event_id, source, *, observed_at="2026-01-01T12:00:00Z", title="River flooding reported", lon=-3.7, lat=40.4, confidence=0.6):
+        return {
+            "id": event_id,
+            "kind": "flood",
+            "title": title,
+            "description": "water rising near the river",
+            "observed_at": observed_at,
+            "area": "Test Area",
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "severity": 0.8,
+            "official": False,
+            "source": {"name": source},
+            "confidence": confidence,
+        }
+
+    def test_naive_and_aware_datetimes_can_be_compared(self):
+        a = self.event("a", "A", observed_at="2026-01-01T12:00:00")
+        b = self.event("b", "B", observed_at="2026-01-01T13:00:00Z")
+        score, parts = candidate_score(a, b)
+        self.assertGreater(score, 0)
+        self.assertIsNotNone(parts["time"])
+
+    def test_invalid_coordinates_are_not_used_as_distance_evidence(self):
+        bad = self.event("a", "A", lon=999, lat=999)
+        good = self.event("b", "B")
+        self.assertIsNone(_point(bad))
+        score, parts = candidate_score(bad, good)
+        self.assertGreater(score, 0)
+        self.assertEqual(parts["distance"], 0.5)
+
+    def test_non_finite_confidence_cannot_poison_output(self):
+        a = self.event("a", "A", confidence=float("nan"))
+        b = self.event("b", "B", confidence=0.7)
+        result = verify([a, b])
+        self.assertEqual(len(result), 1)
+        self.assertGreaterEqual(result[0]["confidence"], 0)
+        self.assertLessEqual(result[0]["confidence"], 0.995)
+
+    def test_output_is_invariant_under_input_permutation(self):
+        a = self.event("a", "A")
+        b = self.event("b", "B", observed_at="2026-01-01T12:20:00+00:00", confidence=0.7)
+        c = self.event("c", "C", observed_at="2026-01-03T12:00:00Z", title="Different flood report")
+        expected = verify([a, b, c])
+        for permutation in itertools.permutations([a, b, c]):
+            self.assertEqual(verify(list(permutation)), expected)
+
+    def test_duplicate_reports_from_same_source_count_once(self):
+        a = self.event("a", "Agency A", confidence=0.6)
+        b = self.event("b", "Agency A", confidence=0.9)
+        result = verify([a, b])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["verification"]["independent_source_count"], 1)
+        self.assertEqual(result[0]["confidence"], 0.9)
+
+
+if __name__ == "__main__":
+    unittest.main()
