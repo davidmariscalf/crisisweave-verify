@@ -6,11 +6,13 @@ import re
 import sys
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TextIO
 
 MATCH_THRESHOLD = 0.67
 MAX_HOURS = 24.0
 MAX_KM = 75.0
+MAX_EVENTS = 100_000
+MAX_EVENT_LINE_CHARS = 2 * 1024 * 1024
 
 
 def _tokens(text: str) -> set[str]:
@@ -199,10 +201,36 @@ def verify(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [merge_group(group) for group in cluster(clean)]
 
 
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-standard JSON constant is not allowed: {value}")
+
+
+def load_events(stream: TextIO) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for number, line in enumerate(stream, 1):
+        if len(line) > MAX_EVENT_LINE_CHARS:
+            raise ValueError(f"stdin line {number} exceeds {MAX_EVENT_LINE_CHARS} characters")
+        if not line.strip():
+            continue
+        if len(events) >= MAX_EVENTS:
+            raise ValueError(f"stdin exceeds {MAX_EVENTS} events")
+        try:
+            event = json.loads(line, parse_constant=_reject_json_constant)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"stdin line {number} is invalid JSON: {exc.msg}") from exc
+        if not isinstance(event, dict):
+            raise ValueError(f"stdin line {number} must contain a JSON object")
+        events.append(event)
+    return events
+
+
 def main() -> int:
-    events = [json.loads(line) for line in sys.stdin if line.strip()]
+    try:
+        events = load_events(sys.stdin)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     for event in verify(events):
-        print(json.dumps(event, ensure_ascii=False))
+        print(json.dumps(event, ensure_ascii=False, allow_nan=False))
     return 0
 
 
