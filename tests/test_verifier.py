@@ -1,7 +1,8 @@
+import io
 import itertools
 import unittest
 
-from verifier import _point, candidate_score, verify
+from verifier import MAX_EVENT_LINE_CHARS, _point, candidate_score, load_events, verify
 
 
 class VerifierTests(unittest.TestCase):
@@ -35,13 +36,27 @@ class VerifierTests(unittest.TestCase):
         self.assertGreater(score, 0)
         self.assertEqual(parts["distance"], 0.5)
 
-    def test_non_finite_confidence_cannot_poison_output(self):
+    def test_non_finite_confidence_cannot_poison_library_output(self):
         a = self.event("a", "A", confidence=float("nan"))
         b = self.event("b", "B", confidence=0.7)
         result = verify([a, b])
         self.assertEqual(len(result), 1)
         self.assertGreaterEqual(result[0]["confidence"], 0)
         self.assertLessEqual(result[0]["confidence"], 0.995)
+
+    def test_cli_loader_rejects_non_standard_json_numbers(self):
+        with self.assertRaises(ValueError):
+            load_events(io.StringIO('{"id":"x","confidence":NaN}\n'))
+        with self.assertRaises(ValueError):
+            load_events(io.StringIO('{"id":"x","confidence":Infinity}\n'))
+
+    def test_cli_loader_requires_objects(self):
+        with self.assertRaises(ValueError):
+            load_events(io.StringIO('[1,2,3]\n'))
+
+    def test_cli_loader_rejects_oversized_lines(self):
+        with self.assertRaises(ValueError):
+            load_events(io.StringIO("x" * (MAX_EVENT_LINE_CHARS + 1)))
 
     def test_output_is_invariant_under_input_permutation(self):
         a = self.event("a", "A")
