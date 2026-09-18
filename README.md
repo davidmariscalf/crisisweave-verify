@@ -30,3 +30,7 @@ The thresholds are constants at the top of `verifier.py` so deployments can audi
 ## Confidence
 
 Evidence is aggregated with diminishing returns. Multiple independent sources increase confidence; repeated copies from the same source do not count as independent corroboration. Official reports receive a higher default evidence weight, but community reports are never discarded solely because they are unofficial.
+
+## Provenance in merged incidents
+
+Merged incidents retain report-level provenance for the strongest contribution from every independent source, including the original event ID, source ID/type/URL, observation time, official status and evidence weight. The verification block also exposes the observation time window and severity range so downstream tools can show disagreement and age instead of collapsing corroboration into a single opaque score. Confidence remains a ranking signal, not a probability of truth.
