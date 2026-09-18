@@ -66,6 +66,23 @@ class VerifierTests(unittest.TestCase):
         for permutation in itertools.permutations([a, b, c]):
             self.assertEqual(verify(list(permutation)), expected)
 
+    def test_provenance_keeps_report_level_details(self):
+        a = self.event("a", "Agency A", confidence=0.6)
+        a["source"].update({"source_id": "A-001", "type": "cap", "url": "https://example.invalid/a"})
+        b = self.event("b", "Agency B", observed_at="2026-01-01T13:30:00Z", confidence=0.8)
+        b["source"].update({"source_id": "B-002", "type": "field"})
+
+        result = verify([a, b])[0]
+        self.assertEqual(result["verification"]["independent_source_count"], 2)
+        self.assertEqual(result["verification"]["provenance_entries"], 2)
+        self.assertEqual(result["verification"]["observation_window"]["span_hours"], 1.5)
+        self.assertEqual(result["verification"]["severity_range"], {"min": 0.8, "max": 0.8})
+        by_source = {item["source"]: item for item in result["evidence"]}
+        self.assertEqual(by_source["Agency A"]["source_id"], "A-001")
+        self.assertEqual(by_source["Agency A"]["event_id"], "a")
+        self.assertEqual(by_source["Agency A"]["source_type"], "cap")
+        self.assertEqual(by_source["Agency B"]["observed_at"], "2026-01-01T13:30:00Z")
+
     def test_duplicate_reports_from_same_source_count_once(self):
         a = self.event("a", "Agency A", confidence=0.6)
         b = self.event("b", "Agency A", confidence=0.9)
