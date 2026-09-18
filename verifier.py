@@ -134,17 +134,34 @@ def _evidence_weight(event: dict[str, Any]) -> float:
     return max(0.05, min(0.95, base))
 
 
+def _provenance_entry(event: dict[str, Any]) -> dict[str, Any]:
+    source = event.get("source") if isinstance(event.get("source"), dict) else {}
+    return {
+        "source": _source_key(event),
+        "source_id": source.get("source_id"),
+        "source_type": source.get("type"),
+        "source_url": source.get("url"),
+        "event_id": str(event.get("id") or ""),
+        "observed_at": event.get("observed_at"),
+        "official": bool(event.get("official")),
+        "weight": round(_evidence_weight(event), 4),
+    }
+
+
 def aggregate_confidence(events: list[dict[str, Any]]) -> tuple[float, list[dict[str, Any]]]:
-    strongest_by_source: dict[str, float] = {}
-    for event in events:
+    strongest_by_source: dict[str, dict[str, Any]] = {}
+    for event in sorted(events, key=_event_key):
         key = _source_key(event)
-        strongest_by_source[key] = max(strongest_by_source.get(key, 0.0), _evidence_weight(event))
+        weight = _evidence_weight(event)
+        current = strongest_by_source.get(key)
+        if current is None or weight > current["weight"]:
+            strongest_by_source[key] = {"weight": weight, "event": event}
 
     residual = 1.0
     explanation: list[dict[str, Any]] = []
-    for source, weight in sorted(strongest_by_source.items(), key=lambda item: item[0].casefold()):
-        residual *= 1.0 - weight
-        explanation.append({"source": source, "weight": round(weight, 4)})
+    for source, entry in sorted(strongest_by_source.items(), key=lambda item: item[0].casefold()):
+        residual *= 1.0 - entry["weight"]
+        explanation.append(_provenance_entry(entry["event"]))
     return round(min(0.995, 1.0 - residual), 4), explanation
 
 
@@ -176,6 +193,31 @@ def cluster(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return groups
 
 
+def _observation_window(events: list[dict[str, Any]]) -> dict[str, Any]:
+    observed = sorted(dt for dt in (_dt(event.get("observed_at")) for event in events) if dt is not None)
+    if not observed:
+        return {"earliest_observed_at": None, "latest_observed_at": None, "span_hours": None}
+    return {
+        "earliest_observed_at": observed[0].isoformat(),
+        "latest_observed_at": observed[-1].isoformat(),
+        "span_hours": round((observed[-1] - observed[0]).total_seconds() / 3600.0, 4),
+    }
+
+
+def _numeric_range(events: list[dict[str, Any]], field: str) -> dict[str, float] | None:
+    values: list[float] = []
+    for event in events:
+        try:
+            value = float(event.get(field))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    if not values:
+        return None
+    return {"min": round(min(values), 4), "max": round(max(values), 4)}
+
+
 def merge_group(group: list[dict[str, Any]]) -> dict[str, Any]:
     ranked = sorted(
         group,
@@ -191,6 +233,9 @@ def merge_group(group: list[dict[str, Any]]) -> dict[str, Any]:
         "report_count": len(group),
         "independent_source_count": len(sources),
         "merged_event_ids": [str(e.get("id")) for e in sorted(group, key=_event_key)],
+        "observation_window": _observation_window(group),
+        "severity_range": _numeric_range(group, "severity"),
+        "provenance_entries": len(sources),
         "confidence_note": "ranking signal, not probability of truth",
     }
     return merged
