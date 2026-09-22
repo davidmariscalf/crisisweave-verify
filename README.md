@@ -1,36 +1,86 @@
 # crisisweave-verify
 
-Explainable deduplication and confidence aggregation for CrisisWeave events.
+**Explainable event deduplication and confidence aggregation for noisy multi-source crisis reports.**
 
-The goal is deliberately narrower than "AI fact checking": given multiple reports, identify likely duplicates, preserve every source, and calculate a confidence score whose inputs are visible.
+`crisisweave-verify` takes normalized JSONL reports, finds likely duplicates, preserves source-level provenance and emits merged incidents with auditable verification metadata.
 
-## Why deterministic first
+It is deliberately narrower than “AI fact checking”: the output is a transparent ranking signal for human review, not a claim that an event is true.
 
-In a crisis, an opaque model can fail silently. The MVP therefore combines lexical similarity, time distance, optional geographic distance, source independence, and official-source status. The score is not a probability that an event is true; it is a ranking signal for human review.
+## 60-second demo
 
-## Quick start
+Requires Python 3.10+ and no third-party packages.
 
 ```bash
 cat events.jsonl | python verifier.py > verified.jsonl
 ```
 
-The CLI accepts normalized CrisisWeave JSON objects, one per line. Likely duplicates are clustered and emitted as one merged event with `verification` metadata.
+A useful end-to-end test with the companion simulator:
 
-## Matching gates
+```bash
+git clone https://github.com/davidmariscalf/crisisweave-sim.git
+python crisisweave-sim/simulate.py --scenario mixed --count 60 --seed 42 > events.jsonl
+cat events.jsonl | python verifier.py > verified.jsonl
+```
 
-Reports can merge only when their event kind is compatible and their time/location are not obviously contradictory. A weighted candidate score then considers:
+Now `verified.jsonl` contains clustered incidents with evidence and provenance instead of silently discarding duplicate reports.
+
+## What the verifier considers
+
+Reports can merge only when their event kind is compatible and their time/location are not obviously contradictory. Candidate matching then considers:
 
 - title/description token overlap
-- observation time proximity
-- point distance when both reports have coordinates
+- observation-time proximity
+- geographic distance when both reports have coordinates
 - area-name overlap
 
-The thresholds are constants at the top of `verifier.py` so deployments can audit and tune them.
+The thresholds are constants at the top of `verifier.py`, so deployments can inspect and tune them.
 
-## Confidence
+## Why deterministic first?
 
-Evidence is aggregated with diminishing returns. Multiple independent sources increase confidence; repeated copies from the same source do not count as independent corroboration. Official reports receive a higher default evidence weight, but community reports are never discarded solely because they are unofficial.
+Opaque models can fail silently, especially on edge cases. This verifier is designed so that a reviewer can understand why two reports were grouped and what evidence contributed to the resulting confidence signal.
 
-## Provenance in merged incidents
+That makes it useful for:
 
-Merged incidents retain report-level provenance for the strongest contribution from every independent source, including the original event ID, source ID/type/URL, observation time, official status and evidence weight. The verification block also exposes the observation time window and severity range so downstream tools can show disagreement and age instead of collapsing corroboration into a single opaque score. Confidence remains a ranking signal, not a probability of truth.
+- regression testing
+- incident-feed prototyping
+- explainable deduplication benchmarks
+- provenance-preserving aggregation
+- human-in-the-loop triage systems
+
+## Confidence is not probability
+
+Evidence is aggregated with diminishing returns:
+
+- independent sources can increase confidence
+- repeated copies from the same source do not count as independent corroboration
+- official reports receive a higher default evidence weight
+- unofficial/community reports are not discarded solely because they are unofficial
+
+The resulting confidence value is a ranking signal for review, **not** a calibrated probability that an incident is true.
+
+## Provenance survives merging
+
+Merged incidents retain report-level provenance for the strongest contribution from every independent source, including:
+
+- original event ID
+- source ID/type/URL
+- observation time
+- official status
+- evidence weight
+- observation-time window
+- severity range
+
+Downstream tools can therefore expose disagreement, age and source diversity instead of collapsing everything into one opaque number.
+
+## Part of CrisisWeave
+
+This repository is a standalone component of [CrisisWeave](https://github.com/davidmariscalf/CrisisWeave).
+
+Related repositories:
+
+- [crisisweave-sim](https://github.com/davidmariscalf/crisisweave-sim) — deterministic synthetic crisis-event generation
+- [crisisweave-map](https://github.com/davidmariscalf/crisisweave-map) — browser interfaces for incident and recovery views
+
+## Safety
+
+This project supports information review; it is not an emergency authority, dispatch system or substitute for official instructions. A higher confidence score must not be interpreted as proof of safety or truth.
